@@ -30,6 +30,17 @@ function includesExplicitReference(signalText, value) {
   return normalizedSignal.includes(normalizedValue);
 }
 
+function includesWorkflowIntent(signalText, target) {
+  const normalizedSignal = normalizeText(signalText).toLowerCase();
+  if (!normalizedSignal) return false;
+
+  const pathMatched = typeof target.path === "string" && includesExplicitReference(signalText, target.path);
+  const nextStepMatched = typeof target.nextStep === "string" && includesExplicitReference(signalText, target.nextStep);
+  const hasContinueIntent = /(continue|resume|read.*first|follow.*next step|继续|接着|下一步|先读|按文档)/i.test(normalizedSignal);
+
+  return hasContinueIntent && (pathMatched || nextStepMatched);
+}
+
 export function extractLatestHandoffPrompt(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return null;
 
@@ -77,7 +88,7 @@ export function shouldPreferWorkflowTarget(target, evidence, goal = "") {
     .filter(Boolean)
     .some((value) => includesExplicitReference(signalText, value));
 
-  if (explicitReferences) {
+  if (explicitReferences || includesWorkflowIntent(signalText, target)) {
     return true;
   }
 

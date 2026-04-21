@@ -1,13 +1,8 @@
+import { buildHandoffContract, renderHandoffContract } from "./handoff-contract.js";
 import { extractLatestHandoffPrompt, shouldPreferWorkflowTarget } from "./handoff-heuristics.js";
 import { buildSessionEvidence } from "./session-evidence.js";
 
-const MAX_FILE_COUNT = 8;
-
-function ensureSentence(text) {
-  const trimmed = text.trim();
-  if (!trimmed) return "";
-  return /[.!?。]$/.test(trimmed) ? trimmed : `${trimmed}.`;
-}
+const MAX_FILE_COUNT = 24;
 
 function formatWorkflowContextBlock(workflowContext) {
   if (!workflowContext || workflowContext.lines.length === 0) return "";
@@ -65,9 +60,17 @@ function collectFileEvidence(messages) {
   };
 }
 
+
 function buildCompactEvidence(messages, goal, cwd, sessionInfo, workflowContext) {
   const sessionEvidence = buildSessionEvidence(messages);
-  const { recentUserMessages, taskUserMessages, assistantStatusMessages, latestAssistantText, primaryUserMessage } = sessionEvidence;
+  const {
+    recentUserMessages,
+    taskUserMessages,
+    assistantStatusMessages,
+    latestAssistantText,
+    primaryUserMessage,
+    structuredAssistantSummary,
+  } = sessionEvidence;
   const { modifiedFiles, readFiles } = collectFileEvidence(messages);
   const lines = [];
 
@@ -80,7 +83,7 @@ function buildCompactEvidence(messages, goal, cwd, sessionInfo, workflowContext)
   if (trimmedGoal) {
     lines.push(`Goal: ${trimmedGoal}`);
   } else {
-    lines.push("Goal: infer the next concrete task and write the actual user message that should be sent now.");
+    lines.push("Goal: write the strongest continuation handoff for a new session, preserving actual progress and remaining work.");
   }
 
   const workflowBlock = formatWorkflowContextBlock(workflowContext);
@@ -100,6 +103,46 @@ function buildCompactEvidence(messages, goal, cwd, sessionInfo, workflowContext)
     lines.push("Most recent user requests:");
     for (const message of recentUserMessages) {
       lines.push(`- ${message}`);
+    }
+  }
+
+  if (structuredAssistantSummary) {
+    lines.push("");
+    lines.push("Structured handoff state extracted from the latest assistant summary:");
+    if (structuredAssistantSummary.sectionTitles.length > 0) {
+      lines.push(`- Original section titles: ${structuredAssistantSummary.sectionTitles.join(" | ")}`);
+    }
+    if (structuredAssistantSummary.completedItems.length > 0) {
+      lines.push("- Already completed:");
+      for (const item of structuredAssistantSummary.completedItems) lines.push(`  - ${item}`);
+    }
+    if (structuredAssistantSummary.remainingItems.length > 0) {
+      lines.push("- Remaining work:");
+      for (const item of structuredAssistantSummary.remainingItems) lines.push(`  - ${item}`);
+    }
+    if (structuredAssistantSummary.fileItems.length > 0) {
+      lines.push("- Key files already touched:");
+      for (const item of structuredAssistantSummary.fileItems) lines.push(`  - ${item}`);
+    }
+    if (structuredAssistantSummary.sourceDocuments.length > 0) {
+      lines.push("- Source documents explicitly referenced:");
+      for (const item of structuredAssistantSummary.sourceDocuments) lines.push(`  - ${item}`);
+    }
+    if (structuredAssistantSummary.verificationItems.length > 0) {
+      lines.push("- Verification already confirmed:");
+      for (const item of structuredAssistantSummary.verificationItems) lines.push(`  - ${item}`);
+    }
+    if (structuredAssistantSummary.constraintItems.length > 0) {
+      lines.push("- Constraints to preserve:");
+      for (const item of structuredAssistantSummary.constraintItems) lines.push(`  - ${item}`);
+    }
+    if (structuredAssistantSummary.completionItems.length > 0) {
+      lines.push("- Completion criteria:");
+      for (const item of structuredAssistantSummary.completionItems) lines.push(`  - ${item}`);
+    }
+    if (structuredAssistantSummary.contextItems.length > 0) {
+      lines.push("- Context:");
+      for (const item of structuredAssistantSummary.contextItems) lines.push(`  - ${item}`);
     }
   }
 
@@ -127,6 +170,19 @@ function buildCompactEvidence(messages, goal, cwd, sessionInfo, workflowContext)
     }
   }
 
+  const languageSignalText = [
+    ...taskUserMessages,
+    ...recentUserMessages,
+    ...assistantStatusMessages,
+    primaryUserMessage,
+    latestAssistantText,
+    ...(structuredAssistantSummary?.sectionTitles ?? []),
+    ...(structuredAssistantSummary?.contextItems ?? []),
+    ...(structuredAssistantSummary?.remainingItems ?? []),
+    ...(structuredAssistantSummary?.constraintItems ?? []),
+    ...(structuredAssistantSummary?.sourceDocuments ?? []),
+  ].filter(Boolean).join("\n");
+
   return {
     recentUserMessages,
     taskUserMessages,
@@ -135,66 +191,32 @@ function buildCompactEvidence(messages, goal, cwd, sessionInfo, workflowContext)
     primaryUserMessage,
     modifiedFiles,
     readFiles,
+    completedItems: structuredAssistantSummary?.completedItems ?? [],
+    remainingItems: structuredAssistantSummary?.remainingItems ?? [],
+    fileItems: structuredAssistantSummary?.fileItems ?? [],
+    verificationItems: structuredAssistantSummary?.verificationItems ?? [],
+    constraintItems: structuredAssistantSummary?.constraintItems ?? [],
+    completionItems: structuredAssistantSummary?.completionItems ?? [],
+    contextItems: structuredAssistantSummary?.contextItems ?? [],
+    sourceDocuments: structuredAssistantSummary?.sourceDocuments ?? [],
+    sectionTitles: structuredAssistantSummary?.sectionTitles ?? [],
+    structuredSections: structuredAssistantSummary?.sections ?? [],
+    preferredLanguage: /[\u3400-\u9fff\uf900-\ufaff]/.test(languageSignalText) ? "chinese" : "english",
     block: lines.join("\n"),
   };
 }
 
 function buildFallbackHandoff(sessionInfo, goal, cwd, workflowContext, evidence) {
-  const target = getWorkflowTarget(workflowContext);
-  const goalLine = goal.trim();
+  const workflowTarget = getWorkflowTarget(workflowContext);
+  const contract = buildHandoffContract({
+    goal,
+    cwd,
+    sessionInfo,
+    workflowTarget,
+    evidence,
+  });
 
-  if (target) {
-    const taskSentence = target.uncheckedItems?.length > 0
-      ? `Read ${target.path} first. Then resume this pending work: ${ensureSentence(target.uncheckedItems[0])}`
-      : target.nextStep
-        ? `Read ${target.path} first. Then follow this documented next step: ${ensureSentence(target.nextStep)}`
-        : `Read ${target.path} first and use it as the source of truth for the next task.`;
-
-    const lines = [taskSentence, ""];
-    if (target.title) lines.push(`- Workflow file: ${target.path} (${target.title}).`);
-    else lines.push(`- Workflow file: ${target.path}.`);
-    if (target.status) lines.push(`- Status: ${target.status}.`);
-    if (target.uncheckedItems?.length > 0) {
-      lines.push(`- Pending work: ${target.uncheckedItems.join(" | ")}.`);
-    }
-    if (target.nextStep) {
-      lines.push(`- Documented next step: ${target.nextStep}.`);
-    }
-    if (goalLine) {
-      lines.push(`- Session goal: ${goalLine}.`);
-    }
-    if (sessionInfo.cwd && sessionInfo.cwd !== cwd) {
-      lines.push(`- Relevant previous-session cwd: ${sessionInfo.cwd}.`);
-    }
-    lines.push("- Do not redo finished work or invent extra scope.");
-    lines.push("- Report back with what you completed, which files changed, and the next natural step.");
-    return lines.join("\n");
-  }
-
-  const taskBearingUserMessage = evidence.primaryUserMessage || evidence.recentUserMessages[evidence.recentUserMessages.length - 1] || "";
-  const firstSentence = goalLine
-    ? ensureSentence(goalLine)
-    : taskBearingUserMessage
-      ? ensureSentence(taskBearingUserMessage)
-      : evidence.modifiedFiles.length > 0
-        ? `Read ${evidence.modifiedFiles.join(", ")} first and continue the next unfinished task.`
-        : "Inspect the latest changed files and continue the next unfinished task.";
-
-  const lines = [firstSentence, ""];
-  if (evidence.modifiedFiles.length > 0) {
-    lines.push(`- Read these files first: ${evidence.modifiedFiles.join(", ")}.`);
-  } else if (evidence.readFiles.length > 0) {
-    lines.push(`- Inspect these files first: ${evidence.readFiles.join(", ")}.`);
-  }
-  if (evidence.latestAssistantText) {
-    lines.push(`- Latest confirmed status: ${evidence.latestAssistantText}`);
-  }
-  if (sessionInfo.cwd && sessionInfo.cwd !== cwd) {
-    lines.push(`- Relevant previous-session cwd: ${sessionInfo.cwd}.`);
-  }
-  lines.push("- Do not redo finished work or invent extra scope.");
-  lines.push("- Report back with what you completed, which files changed, and the next natural step.");
-  return lines.join("\n");
+  return renderHandoffContract(contract, { forceContractFormat: true });
 }
 
 export function decideFxxkAction({
@@ -229,11 +251,34 @@ export async function buildHandoffPromptFromMessages({
     return latestHandoffPrompt;
   }
 
-  if (hasExplicitWorkflowTask(workflowTarget) && shouldPreferWorkflowTarget(workflowTarget, evidence, goal)) {
-    return buildFallbackHandoff(sessionInfo, goal, cwd, workflowContext, evidence);
+  const shouldForceWorkflowFallback = hasExplicitWorkflowTask(workflowTarget)
+    && (shouldPreferWorkflowTarget(workflowTarget, evidence, goal) || evidence.preferredLanguage === "chinese");
+
+  if (shouldForceWorkflowFallback) {
+    const workflowEvidence = {
+      ...evidence,
+      sourceDocuments: [...new Set([...(evidence.sourceDocuments ?? []), workflowTarget.path])],
+      primaryUserMessage: evidence.primaryUserMessage || evidence.latestAssistantText,
+      contextItems: [
+        ...(evidence.contextItems ?? []),
+        ...(evidence.primaryUserMessage ? [evidence.primaryUserMessage] : []),
+      ],
+    };
+
+    return buildFallbackHandoff(sessionInfo, goal, cwd, workflowContext, workflowEvidence);
   }
 
-  const prompt = await completePrompt({ evidenceBlock: evidence.block });
+  const prompt = await completePrompt({
+    evidenceBlock: [
+      evidence.block,
+      "",
+      "Return a strong continuation contract that preserves completed work, remaining work, verification, constraints, and completion criteria when supported by the evidence.",
+      "If the evidence already resembles a high-quality handoff note, preserve that shape instead of flattening it into generic bullets.",
+      "Prefer sectioned output when supported by the evidence. Good section patterns include: current context, already completed, files to read first, verification already passing, remaining tasks, constraints to preserve, done when, and report back.",
+      "If the preserved evidence is mostly Chinese, prefer Chinese section headings and phrasing; if it is mostly English, prefer English. Choose the response language naturally from the evidence and user context.",
+      "Do not dump the full latest assistant summary back into the handoff once its structure has already been extracted.",
+    ].join("\n"),
+  });
   return prompt || buildFallbackHandoff(sessionInfo, goal, cwd, workflowContext, evidence);
 }
 

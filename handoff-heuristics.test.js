@@ -72,3 +72,21 @@ test("extractLatestHandoffPrompt ignores generic prompt discussions that do not 
 
   assert.equal(extractLatestHandoffPrompt(messages), null);
 });
+
+test("shouldPreferWorkflowTarget treats Chinese workflow continuation cues as explicit workflow intent", () => {
+  const target = {
+    path: "docs/plans/2026-04-21-001-fix-ideas-stage-comment-humanization-plan.md",
+    title: "Fix ideas stage comment humanization",
+    nextStep: "Unit 2: Split judge_voice and judge_adapter",
+  };
+  const evidence = {
+    recentUserMessages: [
+      "继续 docs/plans/2026-04-21-001-fix-ideas-stage-comment-humanization-plan.md，下一步是 Unit 2：拆分 judge_voice 和 judge_adapter。",
+    ],
+    latestAssistantText: "继续 docs/plans/2026-04-21-001-fix-ideas-stage-comment-humanization-plan.md，下一步是 Unit 2：拆分 judge_voice 和 judge_adapter。",
+    modifiedFiles: [],
+    readFiles: [],
+  };
+
+  assert.equal(shouldPreferWorkflowTarget(target, evidence, ""), true);
+});

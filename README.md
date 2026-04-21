@@ -37,6 +37,7 @@ In the source session, `/fxxk`:
 - reads the current session's visible context
 - reuses an already explicit handoff prompt when one is present in transcript history
 - otherwise composes a fresh handoff prompt
+- extracts more than just the next action: it tries to preserve completed work, remaining work, key files, verification state, constraints, and completion criteria when that evidence exists
 - lets you review or copy it
 - stages it as a single-use prompt for the next session
 
@@ -125,6 +126,8 @@ If you want to steer the handoff goal, pass it inline:
 
 This generates a handoff prompt from the current session, opens it for review or copy, and stages it for the next session.
 
+The target shape is closer to a continuation execution contract than a tiny recap: one clear next action, then only the progress, remaining work, files, checks, and constraints that materially help the next session continue without guessing.
+
 ### 2. Open the next session manually
 
 Run:
@@ -199,9 +202,11 @@ If the source session never generated a staged prompt, `/fxxk` in the child sess
 - Staged prompts are single-use and are cleared after successful consumption
 - If you run `/fxxk` multiple times in the source session, only the latest staged prompt remains active
 - `/fxxk` still prefers explicit workflow artifacts and compact recent evidence over summarizing an entire prior session when it has to synthesize a new prompt
+- when a recent assistant report already contains handoff structure like completed work, remaining tasks, verification, or execution constraints, `/fxxk` now tries to preserve those layers instead of collapsing everything into a one-line next step
 - If the session history already contains an explicit copy-paste handoff prompt, `/fxxk` reuses it directly
 - Workflow markdown is only treated as the source of truth when the preserved session evidence is thin or explicitly points back to that artifact
-- All user-facing content and prompt instructions are kept in English
+- `/fxxk` now biases generation toward a richer continuation contract instead of a minimal next-step prompt
+- model-generated handoffs and deterministic fallback both try to follow the natural response language and structure implied by the preserved user context and evidence
 
 ## Install as a pi package
 
