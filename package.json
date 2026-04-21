@@ -1,8 +1,8 @@
 {
   "name": "pi-fuck",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Pi extension that turns /fuck into an automatic continuation message.",
+  "description": "Pi extension that turns /fuck into a two-stage handoff command.",
   "main": "./fuck.js",
   "keywords": ["pi-package"],
   "pi": {

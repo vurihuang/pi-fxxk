@@ -3,34 +3,20 @@ import { readFileSync } from "node:fs";
 import { complete } from "@mariozechner/pi-ai";
 import { BorderedLoader, SessionManager } from "@mariozechner/pi-coding-agent";
 
+import { buildHandoffPromptFromMessages, decideFuckAction } from "./fuck-core.js";
+import {
+  FUCK_STATE_CUSTOM_TYPE,
+  createConsumedPrompt,
+  createSourceSessionLink,
+  createSourceSessionLinkClear,
+  createStagedPrompt,
+  createSupersededPrompt,
+  getLatestPendingStagedPrompt,
+  getLinkedSourceSessionFile,
+} from "./handoff-state.js";
 import { discoverWorkflowContext } from "./workflow-context.js";
 
 const HANDOFF_SYSTEM_PROMPT = readFileSync(new URL("./handoff-system-prompt.md", import.meta.url), "utf8").trim();
-const MAX_RECENT_USER_MESSAGES = 3;
-const MAX_MESSAGE_CHARS = 500;
-const MAX_ASSISTANT_CHARS = 1000;
-const MAX_FILE_COUNT = 8;
-
-function normalizeText(text) {
-  return text.replace(/\s+/g, " ").trim();
-}
-
-function truncateText(text, maxChars) {
-  const normalized = normalizeText(text);
-  if (!normalized) return "";
-  if (normalized.length <= maxChars) return normalized;
-  return `${normalized.slice(0, maxChars - 1).trimEnd()}…`;
-}
-
-function ensureSentence(text) {
-  const trimmed = text.trim();
-  if (!trimmed) return "";
-  return /[.!?。]$/.test(trimmed) ? trimmed : `${trimmed}.`;
-}
-
-function isLowSignalMessage(text) {
-  return /^(continue|go on|继续|继续吧|继续。)$/i.test(normalizeText(text));
-}
 
 function getSessionLabel(session) {
   if (session.name?.trim()) return session.name.trim();
@@ -82,212 +68,6 @@ function getRetryMessage() {
   };
 }
 
-function formatWorkflowContextBlock(workflowContext) {
-  if (!workflowContext || workflowContext.lines.length === 0) return "";
-
-  return [
-    "Structured workflow context was found in the workspace. Prefer these markdown artifacts when they clearly define the next task:",
-    ...workflowContext.lines,
-  ].join("\n");
-}
-
-function getWorkflowTarget(workflowContext) {
-  return workflowContext.activePlan ?? workflowContext.requirements ?? workflowContext.genericWorkflowDocs[0] ?? null;
-}
-
-function hasExplicitWorkflowTask(target) {
-  return Boolean(target && ((target.uncheckedItems?.length ?? 0) > 0 || target.nextStep || target.status === "active"));
-}
-
-function extractMessageText(message) {
-  if (!message) return "";
-  if (typeof message.content === "string") return normalizeText(message.content);
-  if (!Array.isArray(message.content)) return "";
-
-  return normalizeText(
-    message.content
-      .filter((block) => block?.type === "text" && typeof block.text === "string")
-      .map((block) => block.text)
-      .join("\n"),
-  );
-}
-
-function collectRecentMessageSnippets(messages, role, maxCount, maxChars) {
-  return messages
-    .filter((message) => message?.role === role)
-    .map(extractMessageText)
-    .filter((text) => text && !isLowSignalMessage(text))
-    .slice(-maxCount)
-    .map((text) => truncateText(text, maxChars));
-}
-
-function collectFileEvidence(messages) {
-  const modifiedFiles = [];
-  const readFiles = [];
-  const modified = new Set();
-  const read = new Set();
-
-  for (const message of messages) {
-    if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
-
-    for (const block of message.content) {
-      if (block?.type !== "toolCall" || !block.name || typeof block.arguments !== "object" || !block.arguments) {
-        continue;
-      }
-
-      const filePath = typeof block.arguments.path === "string" ? block.arguments.path : null;
-      if (!filePath) continue;
-
-      if (block.name === "edit" || block.name === "write") {
-        if (!modified.has(filePath)) {
-          modified.add(filePath);
-          modifiedFiles.push(filePath);
-        }
-        read.delete(filePath);
-        continue;
-      }
-
-      if (block.name === "read" && !modified.has(filePath) && !read.has(filePath)) {
-        read.add(filePath);
-        readFiles.push(filePath);
-      }
-    }
-  }
-
-  return {
-    modifiedFiles: modifiedFiles.slice(-MAX_FILE_COUNT),
-    readFiles: readFiles.filter((filePath) => !modified.has(filePath)).slice(-MAX_FILE_COUNT),
-  };
-}
-
-function buildCompactEvidence(previousMessages, goal, cwd, previousSessionInfo, workflowContext) {
-  const recentUserMessages = collectRecentMessageSnippets(
-    previousMessages,
-    "user",
-    MAX_RECENT_USER_MESSAGES,
-    MAX_MESSAGE_CHARS,
-  );
-  const latestAssistantText = collectRecentMessageSnippets(previousMessages, "assistant", 1, MAX_ASSISTANT_CHARS)[0] ?? "";
-  const { modifiedFiles, readFiles } = collectFileEvidence(previousMessages);
-  const lines = [];
-
-  lines.push(`Working directory: ${cwd}`);
-  if (previousSessionInfo.cwd && previousSessionInfo.cwd !== cwd) {
-    lines.push(`Relevant previous-session cwd: ${previousSessionInfo.cwd}`);
-  }
-
-  const trimmedGoal = goal.trim();
-  if (trimmedGoal) {
-    lines.push(`Goal: ${trimmedGoal}`);
-  } else {
-    lines.push("Goal: infer the next concrete task and write the actual user message that should be sent now.");
-  }
-
-  const workflowBlock = formatWorkflowContextBlock(workflowContext);
-  if (workflowBlock) {
-    lines.push("");
-    lines.push(workflowBlock);
-  }
-
-  if (recentUserMessages.length > 0) {
-    lines.push("");
-    lines.push("Most recent user requests:");
-    for (const message of recentUserMessages) {
-      lines.push(`- ${message}`);
-    }
-  }
-
-  if (latestAssistantText) {
-    lines.push("");
-    lines.push("Latest assistant status/report:");
-    lines.push(`- ${latestAssistantText}`);
-  }
-
-  if (modifiedFiles.length > 0) {
-    lines.push("");
-    lines.push("Recently modified files:");
-    for (const filePath of modifiedFiles) {
-      lines.push(`- ${filePath}`);
-    }
-  }
-
-  if (readFiles.length > 0) {
-    lines.push("");
-    lines.push("Recently read-only files:");
-    for (const filePath of readFiles) {
-      lines.push(`- ${filePath}`);
-    }
-  }
-
-  return {
-    recentUserMessages,
-    latestAssistantText,
-    modifiedFiles,
-    readFiles,
-    block: lines.join("\n"),
-  };
-}
-
-function buildFallbackHandoff(previousSessionInfo, goal, cwd, workflowContext, evidence) {
-  const target = getWorkflowTarget(workflowContext);
-  const goalLine = goal.trim();
-
-  if (target) {
-    const taskSentence = target.uncheckedItems?.length > 0
-      ? `Read ${target.path} first. Then resume this pending work: ${ensureSentence(target.uncheckedItems[0])}`
-      : target.nextStep
-        ? `Read ${target.path} first. Then follow this documented next step: ${ensureSentence(target.nextStep)}`
-        : `Read ${target.path} first and use it as the source of truth for the next task.`;
-
-    const lines = [taskSentence, ""];
-    if (target.title) lines.push(`- Workflow file: ${target.path} (${target.title}).`);
-    else lines.push(`- Workflow file: ${target.path}.`);
-    if (target.status) lines.push(`- Status: ${target.status}.`);
-    if (target.uncheckedItems?.length > 0) {
-      lines.push(`- Pending work: ${target.uncheckedItems.join(" | ")}.`);
-    }
-    if (target.nextStep) {
-      lines.push(`- Documented next step: ${target.nextStep}.`);
-    }
-    if (goalLine) {
-      lines.push(`- Session goal: ${goalLine}.`);
-    }
-    if (previousSessionInfo.cwd && previousSessionInfo.cwd !== cwd) {
-      lines.push(`- Relevant previous-session cwd: ${previousSessionInfo.cwd}.`);
-    }
-    lines.push("- Do not redo finished work or invent extra scope.");
-    lines.push("- Report back with what you completed, which files changed, and the next natural step.");
-    return lines.join("\n");
-  }
-
-  const lastUserMessage = evidence.recentUserMessages.length > 0
-    ? evidence.recentUserMessages[evidence.recentUserMessages.length - 1]
-    : "";
-  const firstSentence = goalLine
-    ? ensureSentence(goalLine)
-    : lastUserMessage
-      ? ensureSentence(lastUserMessage)
-      : evidence.modifiedFiles.length > 0
-        ? `Read ${evidence.modifiedFiles.join(", ")} first and continue the next unfinished task.`
-        : "Inspect the latest changed files and continue the next unfinished task.";
-
-  const lines = [firstSentence, ""];
-  if (evidence.modifiedFiles.length > 0) {
-    lines.push(`- Read these files first: ${evidence.modifiedFiles.join(", ")}.`);
-  } else if (evidence.readFiles.length > 0) {
-    lines.push(`- Inspect these files first: ${evidence.readFiles.join(", ")}.`);
-  }
-  if (evidence.latestAssistantText) {
-    lines.push(`- Latest confirmed status: ${evidence.latestAssistantText}`);
-  }
-  if (previousSessionInfo.cwd && previousSessionInfo.cwd !== cwd) {
-    lines.push(`- Relevant previous-session cwd: ${previousSessionInfo.cwd}.`);
-  }
-  lines.push("- Do not redo finished work or invent extra scope.");
-  lines.push("- Report back with what you completed, which files changed, and the next natural step.");
-  return lines.join("\n");
-}
-
 function summarizeResponseShape(response) {
   const blockTypes = Array.isArray(response?.content)
     ? response.content.map((item) => item?.type ?? typeof item).join(", ") || "none"
@@ -296,32 +76,33 @@ function summarizeResponseShape(response) {
   return `stopReason=${response?.stopReason ?? "unknown"}; contentTypes=${blockTypes}; hasOutputText=${hasOutputText}`;
 }
 
-async function loadPreviousSession(ctx) {
-  const currentSessionFile = ctx.sessionManager.getSessionFile();
-  const sessions = await SessionManager.list(ctx.cwd, ctx.sessionManager.getSessionDir());
-  return sessions.find((session) => session.path !== currentSessionFile);
+function getSessionMessagesAndSupportEntries(sessionManager) {
+  const branch = sessionManager.getBranch();
+  return {
+    messages: branch.filter((entry) => entry.type === "message").map((entry) => entry.message),
+    hasSupportEntries: branch.some((entry) => entry.type === "compaction" || entry.type === "branch_summary"),
+  };
 }
 
-async function buildHandoffPrompt(ctx, previousSessionInfo, goal, signal) {
-  const previousSession = SessionManager.open(previousSessionInfo.path, ctx.sessionManager.getSessionDir());
-  const previousBranch = previousSession.getBranch();
-  const previousMessages = previousBranch
-    .filter((entry) => entry.type === "message")
-    .map((entry) => entry.message);
-  const hasUsableHistory = previousMessages.length > 0 || previousBranch.some((entry) => entry.type === "compaction" || entry.type === "branch_summary");
+function getSessionInfo(sessionManager, overrides = {}) {
+  return {
+    path: overrides.path ?? sessionManager.getSessionFile(),
+    cwd: overrides.cwd ?? sessionManager.getCwd(),
+    id: overrides.id ?? sessionManager.getSessionId(),
+    name: overrides.name ?? sessionManager.getSessionName?.(),
+    firstMessage: overrides.firstMessage,
+  };
+}
 
-  if (!hasUsableHistory) {
-    throw new Error("The previous session does not contain usable message content.");
+function sendPrompt(pi, ctx, prompt) {
+  if (ctx.isIdle()) {
+    pi.sendUserMessage(prompt);
+  } else {
+    pi.sendUserMessage(prompt, { deliverAs: "followUp" });
   }
+}
 
-  const workflowContext = discoverWorkflowContext(ctx.cwd);
-  const evidence = buildCompactEvidence(previousMessages, goal, ctx.cwd, previousSessionInfo, workflowContext);
-  const workflowTarget = getWorkflowTarget(workflowContext);
-
-  if (hasExplicitWorkflowTask(workflowTarget)) {
-    return buildFallbackHandoff(previousSessionInfo, goal, ctx.cwd, workflowContext, evidence);
-  }
-
+async function completePromptFromEvidence(ctx, evidenceBlock, signal) {
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
   if (!auth.ok || !auth.apiKey) {
     throw new Error(auth.ok ? `No API key for ${ctx.model.provider}` : auth.error);
@@ -337,7 +118,7 @@ async function buildHandoffPrompt(ctx, previousSessionInfo, goal, signal) {
             "Compact continuation evidence follows. Write the actual next user message to send now.",
             "Do not summarize the whole session or add handoff narration.",
             "",
-            evidence.block,
+            evidenceBlock,
           ].join("\n"),
         },
       ],
@@ -387,21 +168,59 @@ async function buildHandoffPrompt(ctx, previousSessionInfo, goal, signal) {
     summarizeResponseShape(retryResponse),
   );
 
-  return buildFallbackHandoff(previousSessionInfo, goal, ctx.cwd, workflowContext, evidence);
+  return null;
 }
 
-async function generatePromptWithLoader(ctx, previousSessionInfo, goal) {
-  const sessionLabel = getSessionLabel(previousSessionInfo);
+async function buildPromptForSession(ctx, sessionManager, sessionInfo, goal, signal) {
+  const { messages, hasSupportEntries } = getSessionMessagesAndSupportEntries(sessionManager);
+  const workflowContext = discoverWorkflowContext(ctx.cwd);
 
+  return buildHandoffPromptFromMessages({
+    messages,
+    goal,
+    cwd: ctx.cwd,
+    sessionInfo,
+    workflowContext,
+    hasSupportEntries,
+    completePrompt: ({ evidenceBlock }) => completePromptFromEvidence(ctx, evidenceBlock, signal),
+  });
+}
+
+function loadSourceSessionState(ctx) {
+  const sourceSessionFile = getLinkedSourceSessionFile(ctx.sessionManager.getBranch());
+  if (!sourceSessionFile) {
+    return null;
+  }
+
+  try {
+    const sourceSession = SessionManager.open(sourceSessionFile, ctx.sessionManager.getSessionDir());
+    const pendingPrompt = getLatestPendingStagedPrompt(sourceSession.getBranch());
+    return {
+      sourceSessionFile,
+      sourceSession,
+      sourceSessionInfo: getSessionInfo(sourceSession, { path: sourceSessionFile }),
+      pendingPrompt,
+    };
+  } catch {
+    return {
+      sourceSessionFile,
+      sourceSession: null,
+      sourceSessionInfo: null,
+      pendingPrompt: null,
+    };
+  }
+}
+
+async function generatePromptWithLoader(ctx, sessionLabel, buildPrompt) {
   if (!ctx.hasUI) {
-    return buildHandoffPrompt(ctx, previousSessionInfo, goal);
+    return buildPrompt();
   }
 
   const result = await ctx.ui.custom((tui, theme, _keybindings, done) => {
-    const loader = new BorderedLoader(tui, theme, `Reading ${sessionLabel} and composing the next user message...`);
+    const loader = new BorderedLoader(tui, theme, `Composing the next /fuck prompt from ${sessionLabel}...`);
     loader.onAbort = () => done({ prompt: null, error: null });
 
-    buildHandoffPrompt(ctx, previousSessionInfo, goal, loader.signal)
+    buildPrompt(loader.signal)
       .then((prompt) => done({ prompt, error: null }))
       .catch((error) => {
         console.error("/fuck generation failed:", error);
@@ -421,21 +240,31 @@ async function generatePromptWithLoader(ctx, previousSessionInfo, goal) {
   return result.prompt;
 }
 
-async function runFuck(pi, args, ctx) {
-  if (!ctx.model) {
-    ctx.ui.notify("/fuck requires an active model.", "error");
-    return;
+async function reviewPromptForStaging(ctx, prompt) {
+  if (!ctx.hasUI) {
+    return prompt;
   }
 
-  const previousSessionInfo = await loadPreviousSession(ctx);
-  if (!previousSessionInfo) {
-    ctx.ui.notify("No previous session was found for this workspace.", "warning");
+  const reviewedPrompt = await ctx.ui.editor("Review or copy the staged /fuck prompt", prompt);
+  if (reviewedPrompt === undefined) {
+    return prompt;
+  }
+
+  const trimmedPrompt = reviewedPrompt.trim();
+  return trimmedPrompt || prompt;
+}
+
+async function stageCurrentSessionPrompt(pi, ctx, goal) {
+  const currentSessionInfo = getSessionInfo(ctx.sessionManager);
+  if (!currentSessionInfo.path) {
+    ctx.ui.notify("/fuck staging requires a persisted session file.", "error");
     return;
   }
 
   let prompt;
   try {
-    prompt = await generatePromptWithLoader(ctx, previousSessionInfo, args.trim());
+    prompt = await generatePromptWithLoader(ctx, getSessionLabel(currentSessionInfo), (signal) =>
+      buildPromptForSession(ctx, ctx.sessionManager, currentSessionInfo, goal, signal));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     ctx.ui.notify(message, "error");
@@ -447,21 +276,71 @@ async function runFuck(pi, args, ctx) {
     return;
   }
 
-  if (ctx.isIdle()) {
-    pi.sendUserMessage(prompt);
-  } else {
-    pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+  const stagedPrompt = await reviewPromptForStaging(ctx, prompt);
+  const latestPendingPrompt = getLatestPendingStagedPrompt(ctx.sessionManager.getBranch());
+  if (latestPendingPrompt) {
+    pi.appendEntry(FUCK_STATE_CUSTOM_TYPE, createSupersededPrompt(latestPendingPrompt.promptId));
+  }
+  pi.appendEntry(FUCK_STATE_CUSTOM_TYPE, createStagedPrompt(stagedPrompt));
+  ctx.ui.notify("Staged a /fuck prompt. Run /new, then /fuck in the new session.", "info");
+}
+
+function clearSourceSessionLink(pi, sourceSessionFile) {
+  pi.appendEntry(FUCK_STATE_CUSTOM_TYPE, createSourceSessionLinkClear(sourceSessionFile));
+}
+
+async function consumeStagedPrompt(pi, ctx, sourceState) {
+  const { pendingPrompt, sourceSession, sourceSessionFile, sourceSessionInfo } = sourceState;
+  if (!pendingPrompt || !sourceSession) {
+    ctx.ui.notify("The staged /fuck prompt could not be loaded.", "error");
+    return;
   }
 
-  ctx.ui.notify(
-    `Sent a continuation message from ${getSessionLabel(previousSessionInfo)}`,
-    "info",
+  sendPrompt(pi, ctx, pendingPrompt.prompt);
+  sourceSession.appendCustomEntry(
+    FUCK_STATE_CUSTOM_TYPE,
+    createConsumedPrompt(pendingPrompt.promptId, ctx.sessionManager.getSessionFile() ?? `session:${ctx.sessionManager.getSessionId()}`),
   );
+  clearSourceSessionLink(pi, sourceSessionFile);
+  ctx.ui.notify(`Sent the staged /fuck prompt from ${getSessionLabel(sourceSessionInfo)}`, "info");
+}
+
+async function runFuck(pi, args, ctx) {
+  if (!ctx.model) {
+    ctx.ui.notify("/fuck requires an active model.", "error");
+    return;
+  }
+
+  const goal = args.trim();
+  const { messages, hasSupportEntries } = getSessionMessagesAndSupportEntries(ctx.sessionManager);
+  const sourceState = loadSourceSessionState(ctx);
+  const action = decideFuckAction({
+    hasCurrentSessionHistory: messages.length > 0 || hasSupportEntries,
+    hasPendingStagedPrompt: Boolean(sourceState?.pendingPrompt),
+  });
+
+  if (action === "stage-current-session") {
+    await stageCurrentSessionPrompt(pi, ctx, goal);
+    return;
+  }
+
+  if (action === "consume-staged-prompt") {
+    await consumeStagedPrompt(pi, ctx, sourceState);
+    return;
+  }
+
+  ctx.ui.notify("No staged /fuck prompt found. Run /fuck in the previous session first.", "warning");
 }
 
 export default function fuckExtension(pi) {
+  pi.on("session_start", async (event) => {
+    if (event.reason === "new" && event.previousSessionFile) {
+      pi.appendEntry(FUCK_STATE_CUSTOM_TYPE, createSourceSessionLink(event.previousSessionFile));
+    }
+  });
+
   pi.registerCommand("fuck", {
-    description: "Read the previous session, compose the next continuation message, and send it automatically",
+    description: "Stage a handoff prompt in the current session, or consume a staged prompt in the next session",
     handler: async (args, ctx) => {
       await runFuck(pi, args, ctx);
     },

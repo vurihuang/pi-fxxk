@@ -7,7 +7,7 @@
 [![npm version](https://img.shields.io/npm/v/pi-fuck)](https://www.npmjs.com/package/pi-fuck)
 [![npm downloads](https://img.shields.io/npm/dm/pi-fuck)](https://www.npmjs.com/package/pi-fuck)
 
-`pi-fuck` is a Pi extension that turns `fuck` into an automatic continuation command.
+`pi-fuck` is a Pi extension that turns `fuck` into a two-stage handoff command.
 
 ## Why this exists
 
@@ -17,32 +17,35 @@ Because this annoying shit keeps happening:
 - A long task finishes a chunk, and then you still have to ask the model to write a stupid little `compact` summary of what it already did, what is still pending, and where the next session should pick things up.
 - You already did the brainstorm, the planning, the workflow ceremony, maybe even used Superpowers or compound-engineering, the todos are still sitting right there unfinished, and the model still goes: "Yes, I can continue. Anything else you want me to do?" Come on. Just continue.
 
-`pi-fuck` exists to kill that handoff friction. Instead of re-explaining the situation like a human glue script, you open a fresh session, type `fuck`, and move on.
+`pi-fuck` exists to kill that handoff friction. Instead of re-explaining the situation like a human glue script, you generate the handoff while the current session still has the best context, then resume from that exact prompt in the next session.
 
 ## What it does
 
-In a fresh Pi session, run:
+`pi-fuck` now uses a two-stage workflow:
 
-```text
-/fuck
-```
+1. run `/fuck` in the source session to generate a copyable handoff prompt from the current session
+2. run `/new` manually
+3. run `/fuck` in the new session to consume that exact staged prompt
 
-
-You can also provide an explicit goal:
+You can also provide an explicit goal when generating the staged prompt:
 
 ```text
 /fuck finish the next test slice and run verification
 ```
 
+In the source session, `/fuck`:
+- reads the current session's visible context
+- reuses an already explicit handoff prompt when one is present in transcript history
+- otherwise composes a fresh handoff prompt
+- lets you review/copy it
+- stages it as a single-use prompt for the next session
 
-The extension will automatically:
+In the next session, `/fuck`:
+- looks for the staged prompt linked from the source session
+- sends that exact prompt as the next user message
+- clears it after successful use
 
-1. find the most recent session in the current workspace that is not the current session
-2. read that session's visible context
-3. compose the concrete next user message needed to continue the work
-4. send that message directly in the current session
-
-This removes the manual copy → summarize → paste workflow.
+If no staged prompt exists, `/fuck` warns that the previous session did not generate a `/fuck` prompt and sends nothing.
 
 ## Inspired by
 
@@ -96,37 +99,55 @@ pi -e /absolute/path/to/pi-fuck
 
 ## Verify installation
 
-After restarting Pi, open a fresh session and run:
+After restarting Pi, open any session and run:
 
 ```text
 /fuck
 ```
 
-If the command is available and the extension can continue from an earlier workspace session, the installation is working.
+If the command is available and the extension stages or consumes a handoff prompt as expected, the installation is working.
 
 ## Usage
 
-Start a new session and run:
+### 1. Generate the staged handoff prompt in the source session
+
+Run:
 
 ```text
 /fuck
 ```
 
-
-If you want to steer the continuation goal, pass it inline:
+If you want to steer the handoff goal, pass it inline:
 
 ```text
 /fuck continue with a planning pass before implementation
 ```
 
+This generates a handoff prompt from the current session, opens it for review/copy, and stages it for the next session.
 
-The slash command and the plain-text trigger behave the same way. The extension looks at the most recent earlier session in the current workspace and turns that prior context into the next concrete user message.
+### 2. Open the next session manually
+
+Run:
+
+```text
+/new
+```
+
+### 3. Consume the staged prompt in the new session
+
+Run:
+
+```text
+/fuck
+```
+
+The slash command and the plain-text trigger behave the same way.
 
 ### Example flow
 
-#### 1. Continue work with no extra instruction
+#### 1. Stage the next-session prompt from the current session
 
-Previous session ended halfway through a task. In a fresh session, run:
+Previous session is still open and has the best context. Run:
 
 ```text
 /fuck
@@ -134,38 +155,52 @@ Previous session ended halfway through a task. In a fresh session, run:
 
 Typical result:
 
-- the extension finds the latest earlier workspace session
-- it reads the visible context from that session
-- it sends a concrete continuation message into the current session
-- Pi resumes the work without you manually summarizing anything
+- the extension reads the current session
+- it generates or reuses the best handoff prompt available
+- it opens that prompt for review/copy
+- it stages the prompt as a single-use handoff for the next session
 
-#### 2. Continue, but force verification next
+#### 2. Stage a verification-focused handoff
 
-If the previous session already implemented most of the code and you want the new session to focus on verification, run:
+If the next session should focus on verification, run:
 
 ```text
 /fuck run the required checks, fix failures, then finish the task
 ```
 
-This biases the generated continuation message toward type-checking, linting, tests, and remaining fixes.
+This biases the staged handoff prompt toward type-checking, linting, tests, and remaining fixes.
 
-#### 3. Continue with a planning-first handoff
+#### 3. Resume from the staged prompt in the next session
 
-If the previous session explored an idea but you want the new session to plan before coding, run:
+After `/new`, run:
 
 ```text
-/fuck first write a short implementation plan, then execute the next slice
+/fuck
 ```
 
-This is useful when the earlier session left behind partial research, unclear scope, or a rough idea that needs structure.
+Typical result:
+
+- the extension finds the staged prompt linked from the source session
+- it sends that exact prompt into the new session
+- it clears the staged prompt so it cannot be reused accidentally
+
+#### 4. Cache miss behavior
+
+If the source session never generated a staged prompt, `/fuck` in the child session:
+
+- warns that no staged `/fuck` prompt was found
+- sends nothing
 
 ## Notes
 
 - The slash command is `/fuck`
 - Plain `fuck` input is also intercepted and handled
-- The extension excludes the current session and uses the most recent earlier session in the same workspace
-- The continuation strategy is intentionally flexible: it can continue implementation, debugging, review, planning, research, or brainstorming depending on the previous session and any explicit goal you provide
-- `/fuck` prefers explicit workflow artifacts and compact recent evidence over summarizing the entire prior session history
+- `/fuck` is session-aware: it stages in the source session, consumes in the child session, and warns on cache miss instead of falling back
+- Staged prompts are single-use and are cleared after successful consumption
+- If you run `/fuck` multiple times in the source session, only the latest staged prompt remains active
+- `/fuck` still prefers explicit workflow artifacts and compact recent evidence over summarizing an entire prior session when it has to synthesize a new prompt
+- If the session history already contains an explicit copy-paste handoff prompt, `/fuck` reuses it directly
+- Workflow markdown is only treated as the source of truth when the preserved session evidence is thin or explicitly points back to that artifact
 - All user-facing content and prompt instructions are kept in English
 
 ## Install as a pi package
