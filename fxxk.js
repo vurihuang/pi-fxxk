@@ -11,6 +11,7 @@ import {
   createSourceSessionLinkClear,
   createStagedPrompt,
   createSupersededPrompt,
+  getLatestPendingStagedPrompt,
   getLinkedSourceSessionFile,
 } from "./handoff-state.js";
 import { discoverWorkflowContext } from "./workflow-context.js";
