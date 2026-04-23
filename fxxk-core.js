@@ -245,6 +245,51 @@ export function getConsumableStagedPrompt({
   return getLatestPendingStagedPrompt(entries);
 }
 
+export function getFallbackSourceSessionCandidates({
+  currentSessionCreatedAt,
+  currentSessionCwd,
+  currentSessionFile,
+  currentSessionId,
+  sessionInfos,
+}) {
+  if (!Array.isArray(sessionInfos) || typeof currentSessionCwd !== "string") {
+    return [];
+  }
+
+  const currentCreatedTime = currentSessionCreatedAt instanceof Date
+    ? currentSessionCreatedAt.getTime()
+    : Number.NaN;
+
+  return sessionInfos
+    .filter((sessionInfo) => {
+      if (!sessionInfo || typeof sessionInfo.path !== "string") {
+        return false;
+      }
+
+      if (sessionInfo.path === currentSessionFile || sessionInfo.id === currentSessionId) {
+        return false;
+      }
+
+      if (!hasMatchingSessionCwd({
+        sourceSessionCwd: sessionInfo.cwd,
+        currentCwd: currentSessionCwd,
+      })) {
+        return false;
+      }
+
+      return Number.isNaN(currentCreatedTime)
+        || !(sessionInfo.created instanceof Date)
+        || sessionInfo.created.getTime() <= currentCreatedTime;
+    })
+    .sort((left, right) => {
+      const createdDelta = right.created.getTime() - left.created.getTime();
+      if (createdDelta !== 0) {
+        return createdDelta;
+      }
+      return right.modified.getTime() - left.modified.getTime();
+    });
+}
+
 export function decideFxxkAction({
   hasCurrentSessionHistory,
   hasPendingStagedPrompt,

@@ -3,7 +3,13 @@ import { readFileSync } from "node:fs";
 import { complete } from "@mariozechner/pi-ai";
 import { BorderedLoader, SessionManager } from "@mariozechner/pi-coding-agent";
 
-import { buildHandoffPromptFromMessages, decideFxxkAction, getConsumableStagedPrompt, hasMatchingSessionCwd } from "./fxxk-core.js";
+import {
+  buildHandoffPromptFromMessages,
+  decideFxxkAction,
+  getConsumableStagedPrompt,
+  getFallbackSourceSessionCandidates,
+  hasMatchingSessionCwd,
+} from "./fxxk-core.js";
 import {
   FXXK_STATE_CUSTOM_TYPE,
   createConsumedPrompt,
@@ -17,6 +23,9 @@ import {
 import { discoverWorkflowContext } from "./workflow-context.js";
 
 const HANDOFF_SYSTEM_PROMPT = readFileSync(new URL("./handoff-system-prompt.md", import.meta.url), "utf8").trim();
+const FXXK_STATE_ENTRY_TYPE = typeof FXXK_STATE_CUSTOM_TYPE === "string" && FXXK_STATE_CUSTOM_TYPE
+  ? FXXK_STATE_CUSTOM_TYPE
+  : "fxxk-state";
 
 function getSessionLabel(session) {
   if (session.name?.trim()) return session.name.trim();
@@ -186,22 +195,17 @@ async function buildPromptForSession(ctx, sessionManager, sessionInfo, goal, sig
   });
 }
 
-function loadSourceSessionState(ctx) {
-  const sourceSessionFile = getLinkedSourceSessionFile(ctx.sessionManager.getBranch());
-  if (!sourceSessionFile) {
-    return null;
-  }
-
+function openSourceSessionState(sourceSessionFile, sessionDir, currentCwd) {
   try {
-    const sourceSession = SessionManager.open(sourceSessionFile, ctx.sessionManager.getSessionDir());
+    const sourceSession = SessionManager.open(sourceSessionFile, sessionDir);
     const sourceSessionInfo = getSessionInfo(sourceSession, { path: sourceSessionFile });
     const isSameCwd = hasMatchingSessionCwd({
       sourceSessionCwd: sourceSessionInfo.cwd,
-      currentCwd: ctx.cwd,
+      currentCwd,
     });
     const pendingPrompt = getConsumableStagedPrompt({
       sourceSessionCwd: sourceSessionInfo.cwd,
-      currentCwd: ctx.cwd,
+      currentCwd,
       entries: sourceSession.getBranch(),
     });
     return {
@@ -220,6 +224,39 @@ function loadSourceSessionState(ctx) {
       isSameCwd: false,
     };
   }
+}
+
+async function loadFallbackSourceSessionState(ctx) {
+  const currentHeader = ctx.sessionManager.getHeader();
+  const sessionInfos = await SessionManager.list(ctx.cwd, ctx.sessionManager.getSessionDir());
+  const candidates = getFallbackSourceSessionCandidates({
+    currentSessionCreatedAt: currentHeader?.timestamp ? new Date(currentHeader.timestamp) : null,
+    currentSessionCwd: ctx.cwd,
+    currentSessionFile: ctx.sessionManager.getSessionFile(),
+    currentSessionId: ctx.sessionManager.getSessionId(),
+    sessionInfos,
+  });
+
+  for (const candidate of candidates) {
+    const state = openSourceSessionState(candidate.path, ctx.sessionManager.getSessionDir(), ctx.cwd);
+    if (state.pendingPrompt) {
+      return state;
+    }
+  }
+
+  return null;
+}
+
+async function loadSourceSessionState(ctx) {
+  const linkedSourceSessionFile = getLinkedSourceSessionFile(ctx.sessionManager.getBranch());
+  if (linkedSourceSessionFile) {
+    const linkedState = openSourceSessionState(linkedSourceSessionFile, ctx.sessionManager.getSessionDir(), ctx.cwd);
+    if (linkedState.pendingPrompt || linkedState.isSameCwd === false) {
+      return linkedState;
+    }
+  }
+
+  return loadFallbackSourceSessionState(ctx);
 }
 
 async function generatePromptWithLoader(ctx, sessionLabel, buildPrompt) {
@@ -290,14 +327,14 @@ async function stageCurrentSessionPrompt(pi, ctx, goal) {
   const stagedPrompt = await reviewPromptForStaging(ctx, prompt);
   const latestPendingPrompt = getLatestPendingStagedPrompt(ctx.sessionManager.getBranch());
   if (latestPendingPrompt) {
-    pi.appendEntry(FXXK_STATE_CUSTOM_TYPE, createSupersededPrompt(latestPendingPrompt.promptId));
+    pi.appendEntry(FXXK_STATE_ENTRY_TYPE, createSupersededPrompt(latestPendingPrompt.promptId));
   }
-  pi.appendEntry(FXXK_STATE_CUSTOM_TYPE, createStagedPrompt(stagedPrompt));
+  pi.appendEntry(FXXK_STATE_ENTRY_TYPE, createStagedPrompt(stagedPrompt));
   ctx.ui.notify("Staged a /fxxk prompt. Run /new, then /fxxk in the new session.", "info");
 }
 
 function clearSourceSessionLink(pi, sourceSessionFile) {
-  pi.appendEntry(FXXK_STATE_CUSTOM_TYPE, createSourceSessionLinkClear(sourceSessionFile));
+  pi.appendEntry(FXXK_STATE_ENTRY_TYPE, createSourceSessionLinkClear(sourceSessionFile));
 }
 
 async function consumeStagedPrompt(pi, ctx, sourceState) {
@@ -321,7 +358,7 @@ async function consumeStagedPrompt(pi, ctx, sourceState) {
 
   sendPrompt(pi, ctx, pendingPrompt.prompt);
   sourceSession.appendCustomEntry(
-    FXXK_STATE_CUSTOM_TYPE,
+    FXXK_STATE_ENTRY_TYPE,
     createConsumedPrompt(pendingPrompt.promptId, ctx.sessionManager.getSessionFile() ?? `session:${ctx.sessionManager.getSessionId()}`),
   );
   clearSourceSessionLink(pi, sourceSessionFile);
@@ -337,7 +374,7 @@ async function runFxxk(pi, args, ctx) {
   const goal = args.trim();
   const { messages, hasSupportEntries } = getSessionMessagesAndSupportEntries(ctx.sessionManager);
   const hasCurrentSessionHistory = messages.length > 0 || hasSupportEntries;
-  const sourceState = loadSourceSessionState(ctx);
+  const sourceState = await loadSourceSessionState(ctx);
 
   if (!hasCurrentSessionHistory && sourceState?.sourceSessionFile && sourceState.isSameCwd === false) {
     clearSourceSessionLink(pi, sourceState.sourceSessionFile);
@@ -366,7 +403,7 @@ async function runFxxk(pi, args, ctx) {
 export default function fxxkExtension(pi) {
   pi.on("session_start", async (event) => {
     if (event.reason === "new" && event.previousSessionFile) {
-      pi.appendEntry(FXXK_STATE_CUSTOM_TYPE, createSourceSessionLink(event.previousSessionFile));
+      pi.appendEntry(FXXK_STATE_ENTRY_TYPE, createSourceSessionLink(event.previousSessionFile));
     }
   });
 

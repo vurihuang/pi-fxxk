@@ -6,9 +6,29 @@ const CLEAR_SOURCE_SESSION_LINK_KIND = "clear-source-session-link";
 const STAGED_PROMPT_KIND = "staged-prompt";
 const SUPERSEDED_PROMPT_KIND = "superseded-prompt";
 const CONSUMED_PROMPT_KIND = "consumed-prompt";
+const LEGACY_FXXK_STATE_CUSTOM_TYPES = new Set(["fuck-state"]);
+const FXXK_STATE_KINDS = new Set([
+  SOURCE_SESSION_LINK_KIND,
+  CLEAR_SOURCE_SESSION_LINK_KIND,
+  STAGED_PROMPT_KIND,
+  SUPERSEDED_PROMPT_KIND,
+  CONSUMED_PROMPT_KIND,
+]);
+
+function hasRecognizedStateKind(data) {
+  return typeof data?.kind === "string" && FXXK_STATE_KINDS.has(data.kind);
+}
 
 function isFxxkStateEntry(entry) {
-  return entry?.type === "custom" && entry.customType === FXXK_STATE_CUSTOM_TYPE && entry.data && typeof entry.data === "object";
+  if (entry?.type !== "custom" || !entry.data || typeof entry.data !== "object") {
+    return false;
+  }
+
+  if (entry.customType === FXXK_STATE_CUSTOM_TYPE || LEGACY_FXXK_STATE_CUSTOM_TYPES.has(entry.customType)) {
+    return true;
+  }
+
+  return entry.customType == null && hasRecognizedStateKind(entry.data);
 }
 
 function getStateData(entry) {

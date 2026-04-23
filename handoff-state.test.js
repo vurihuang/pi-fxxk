@@ -20,6 +20,21 @@ function customEntry(data) {
   };
 }
 
+function legacyCustomEntry(data, customType = "fuck-state") {
+  return {
+    type: "custom",
+    customType,
+    data,
+  };
+}
+
+function typelessCustomEntry(data) {
+  return {
+    type: "custom",
+    data,
+  };
+}
+
 test("getLinkedSourceSessionFile returns the latest linked source session", () => {
   const sourceSessionFile = "/tmp/source-session.jsonl";
 
@@ -111,4 +126,37 @@ test("getLatestPendingStagedPrompt ignores superseded prompts from older staging
 
   assert.equal(pending?.promptId, secondPrompt.promptId);
   assert.equal(pending?.prompt, "second prompt");
+});
+
+test("getLatestPendingStagedPrompt accepts legacy fuck-state entries", () => {
+  const prompt = createStagedPrompt("legacy prompt");
+
+  const pending = getLatestPendingStagedPrompt([
+    legacyCustomEntry(prompt),
+  ]);
+
+  assert.equal(pending?.promptId, prompt.promptId);
+  assert.equal(pending?.prompt, "legacy prompt");
+});
+
+test("getLatestPendingStagedPrompt accepts typeless historic entries when the kind is recognized", () => {
+  const prompt = createStagedPrompt("typeless prompt");
+
+  const pending = getLatestPendingStagedPrompt([
+    typelessCustomEntry(prompt),
+  ]);
+
+  assert.equal(pending?.promptId, prompt.promptId);
+  assert.equal(pending?.prompt, "typeless prompt");
+});
+
+test("getLinkedSourceSessionFile accepts typeless historic source-session-link entries", () => {
+  const sourceSessionFile = "/tmp/source-session.jsonl";
+
+  assert.equal(
+    getLinkedSourceSessionFile([
+      typelessCustomEntry(createSourceSessionLink(sourceSessionFile)),
+    ]),
+    sourceSessionFile,
+  );
 });

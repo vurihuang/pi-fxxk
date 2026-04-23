@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { decideFxxkAction, getConsumableStagedPrompt, hasMatchingSessionCwd } from "./fxxk-core.js";
+import { decideFxxkAction, getConsumableStagedPrompt, getFallbackSourceSessionCandidates, hasMatchingSessionCwd } from "./fxxk-core.js";
 import {
   FXXK_STATE_CUSTOM_TYPE,
   createConsumedPrompt,
@@ -170,4 +170,55 @@ test("case: once the child session has its own history, /fxxk stages the current
 
   assert.equal(scenario.pendingPrompt?.prompt, "latest prompt");
   assert.equal(scenario.action, "stage-current-session");
+});
+
+test("case: fallback source-session candidates prefer the newest same-cwd session before the child session", () => {
+  const candidates = getFallbackSourceSessionCandidates({
+    currentSessionCreatedAt: new Date("2026-04-23T01:55:12.984Z"),
+    currentSessionCwd: "/tmp/project",
+    currentSessionFile: "/tmp/current.jsonl",
+    currentSessionId: "current",
+    sessionInfos: [
+      {
+        id: "older-same-cwd",
+        path: "/tmp/older.jsonl",
+        cwd: "/tmp/project",
+        created: new Date("2026-04-23T01:40:00.000Z"),
+        modified: new Date("2026-04-23T01:40:05.000Z"),
+      },
+      {
+        id: "newest-same-cwd",
+        path: "/tmp/newest.jsonl",
+        cwd: "/tmp/project",
+        created: new Date("2026-04-23T01:55:06.532Z"),
+        modified: new Date("2026-04-23T01:55:06.532Z"),
+      },
+      {
+        id: "future-session",
+        path: "/tmp/future.jsonl",
+        cwd: "/tmp/project",
+        created: new Date("2026-04-23T01:55:20.000Z"),
+        modified: new Date("2026-04-23T01:55:21.000Z"),
+      },
+      {
+        id: "different-cwd",
+        path: "/tmp/other.jsonl",
+        cwd: "/tmp/other-project",
+        created: new Date("2026-04-23T01:54:00.000Z"),
+        modified: new Date("2026-04-23T01:54:01.000Z"),
+      },
+      {
+        id: "current",
+        path: "/tmp/current.jsonl",
+        cwd: "/tmp/project",
+        created: new Date("2026-04-23T01:55:12.984Z"),
+        modified: new Date("2026-04-23T01:55:12.984Z"),
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    candidates.map((candidate) => candidate.id),
+    ["newest-same-cwd", "older-same-cwd"],
+  );
 });
